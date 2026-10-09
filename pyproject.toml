@@ -1,0 +1,53 @@
+[build-system]
+requires = ["setuptools>=77"]
+build-backend = "setuptools.build_meta"
+
+[project]
+# Published as a separate distribution; the import name stays `transformers_stream_generator`.
+name = "fitzyracing-transformers-stream-generator"
+version = "0.0.6"
+description = "This is a text generation method which returns a generator, streaming out each token in real-time during inference, based on Huggingface/Transformers. (Maintained fork of transformers-stream-generator that works with transformers 4.41+ and 5.x)"
+readme = { file = "README.md", content-type = "text/markdown" }
+license = "MIT"
+license-files = ["LICENSE"]
+authors = [{ name = "LowinLi", email = "lowinli@outlook.com" }]
+maintainers = [{ name = "Joshua Almeida", email = "fitzyracing1@gmail.com" }]
+keywords = [
+    "GPT", "stream", "transformers", "NLP", "model hub", "transformer", "text generation",
+    "summarization", "translation", "q&a", "qg", "machine learning", "CausalLM", "qwen", "fork",
+]
+requires-python = ">=3.5"
+dependencies = ["transformers>=4.26.1"]
+classifiers = [
+    "Intended Audience :: Developers",
+    "Topic :: Scientific/Engineering :: Artificial Intelligence",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.5",
+    "Programming Language :: Python :: 3.6",
+    "Programming Language :: Python :: 3.7",
+    "Programming Language :: Python :: 3.8",
+    "Programming Language :: Python :: 3.9",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+]
+
+[project.optional-dependencies]
+test = ["pytest", "torch"]
+
+[project.urls]
+Homepage = "https://github.com/fitzyracing1/transformers-stream-generator"
+Source = "https://github.com/fitzyracing1/transformers-stream-generator"
+Issues = "https://github.com/fitzyracing1/transformers-stream-generator/issues"
+Changelog = "https://github.com/fitzyracing1/transformers-stream-generator/blob/main/CHANGELOG.md"
+Upstream = "https://github.com/LowinLi/transformers-stream-generator"
+"360 Bench" = "https://github.com/fitzyracing1/360-bench"
+
+[tool.setuptools]
+packages = ["transformers_stream_generator"]
+
+[tool.pytest.ini_options]
+# transformers 4.40 logs some deprecation warnings with a broken format string; pytest's log
+# capture turns that into a test error, so leave logging alone.
+addopts = "-p no:logging"

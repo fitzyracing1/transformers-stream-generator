@@ -1,0 +1,20 @@
+transformers-stream-generator
+Copyright (c) 2023 lowinli
+Licensed under the MIT License (see LICENSE).
+Original project: https://github.com/LowinLi/transformers-stream-generator
+
+fitzyracing-transformers-stream-generator (part of 360 Bench, https://github.com/fitzyracing1/360-bench)
+Modifications copyright 2026 Joshua Almeida, under the same MIT License.
+
+This distribution is transformers-stream-generator 0.0.5 with these changes:
+- transformers_stream_generator/main.py: imports of names removed from transformers 4.57/5.0
+  (BeamSearchScorer, ConstrainedBeamSearchScorer, DisjunctiveConstraint, PhrasalConstraint,
+  SampleOutput) are optional.
+- On transformers < 4.41 the original generate()/sample_stream() code runs unchanged (renamed
+  _legacy_generate/_legacy_sample_stream). On transformers >= 4.41, generate(do_stream=True)
+  streams tokens through transformers' public generate(streamer=...) in a background thread,
+  generate() without do_stream calls transformers' generate(), and sample_stream() raises a
+  clear NotImplementedError.
+- Packaging: pyproject.toml replaces setup.py/setup.cfg; distribution name
+  fitzyracing-transformers-stream-generator; import name unchanged.
+- Tests: tests/test_fork_fixes.py; README, CHANGELOG and this NOTICE.

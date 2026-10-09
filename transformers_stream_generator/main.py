@@ -1,24 +1,59 @@
+import transformers
 from transformers import (
     GenerationConfig,
     GenerationMixin,
     LogitsProcessorList,
+    StoppingCriteria,
     StoppingCriteriaList,
-    DisjunctiveConstraint,
-    BeamSearchScorer,
-    PhrasalConstraint,
-    ConstrainedBeamSearchScorer,
     PreTrainedModel,
 )
+
+# These were removed from transformers in 4.57 / 5.0. They are only needed by the legacy
+# generate() below, which is only used on transformers < 4.41.
+try:
+    from transformers import (
+        DisjunctiveConstraint,
+        BeamSearchScorer,
+        PhrasalConstraint,
+        ConstrainedBeamSearchScorer,
+    )
+except ImportError:
+    DisjunctiveConstraint = None
+    BeamSearchScorer = None
+    PhrasalConstraint = None
+    ConstrainedBeamSearchScorer = None
 import numpy as np
 import random
 import warnings
 import inspect
-from transformers.generation.utils import GenerateOutput, SampleOutput, logger
+import queue
+import threading
+from transformers.generation.utils import logger
+
+try:
+    from transformers.generation.utils import GenerateOutput
+except ImportError:
+    GenerateOutput = None
+try:
+    from transformers.generation.utils import SampleOutput
+except ImportError:
+    SampleOutput = None
 import torch
 from typing import Callable, List, Optional, Union
 from torch import nn
 import torch.distributed as dist
 import copy
+import re
+
+
+# transformers-stream-generator 0.0.5 re-implemented `generate()` of transformers 4.26 on top of
+# private transformers APIs that were changed in 4.41 (and partly removed in 4.57 / 5.0).
+# On transformers < 4.41 that code is still used, unchanged. On newer versions the stream is
+# built on transformers' own public `generate(streamer=...)` instead, and non-stream calls go
+# straight to transformers' `generate()`.
+USE_LEGACY_GENERATE = (
+    tuple(int(x) for x in re.findall(r"\d+", transformers.__version__)[:2]) < (4, 41)
+)
 
 
 def setup_seed(seed):
@@ -39,8 +74,65 @@ class StreamGenerationConfig(GenerationConfig):
 
 
 class NewGenerationMixin(GenerationMixin):
-    @torch.no_grad()
     def generate(
+        self,
+        inputs: Optional[torch.Tensor] = None,
+        generation_config: Optional[StreamGenerationConfig] = None,
+        logits_processor: Optional[LogitsProcessorList] = None,
+        stopping_criteria: Optional[StoppingCriteriaList] = None,
+        prefix_allowed_tokens_fn: Optional[
+            Callable[[int, torch.Tensor], List[int]]
+        ] = None,
+        synced_gpus: Optional[bool] = False,
+        seed=0,
+        **kwargs,
+    ):
+        """`model.generate()` with an extra `do_stream` option.
+
+        With `do_stream=True` it returns a generator that yields the next token ids (a tensor of
+        shape `(batch_size,)`) at every step, using multinomial sampling. Otherwise it behaves like
+        transformers' `generate()`. `seed` (default 0) seeds the random generators first; pass
+        `seed=-1` to leave them alone.
+        """
+        if USE_LEGACY_GENERATE:
+            return NewGenerationMixin._legacy_generate(
+                self,
+                inputs=inputs,
+                generation_config=generation_config,
+                logits_processor=logits_processor,
+                stopping_criteria=stopping_criteria,
+                prefix_allowed_tokens_fn=prefix_allowed_tokens_fn,
+                synced_gpus=synced_gpus,
+                seed=seed,
+                **kwargs,
+            )
+        return _generate(
+            self,
+            inputs=inputs,
+            generation_config=generation_config,
+            logits_processor=logits_processor,
+            stopping_criteria=stopping_criteria,
+            prefix_allowed_tokens_fn=prefix_allowed_tokens_fn,
+            synced_gpus=synced_gpus,
+            seed=seed,
+            **kwargs,
+        )
+
+    def sample_stream(self, *args, **kwargs):
+        """Legacy streaming sampler, only available on transformers < 4.41.
+
+        On newer transformers use `model.generate(..., do_stream=True)`.
+        """
+        if not USE_LEGACY_GENERATE:
+            raise NotImplementedError(
+                "sample_stream() relies on transformers internals that changed in transformers "
+                "4.41 and is not available with transformers %s. Use "
+                "model.generate(..., do_stream=True) instead." % transformers.__version__
+            )
+        return NewGenerationMixin._legacy_sample_stream(self, *args, **kwargs)
+
+    @torch.no_grad()
+    def _legacy_generate(
         self,
         inputs: Optional[torch.Tensor] = None,
         generation_config: Optional[StreamGenerationConfig] = None,
@@ -720,7 +812,7 @@ class NewGenerationMixin(GenerationMixin):
             )
 
     @torch.no_grad()
-    def sample_stream(
+    def _legacy_sample_stream(
         self,
         input_ids: torch.LongTensor,
         logits_processor: Optional[LogitsProcessorList] = None,
@@ -999,6 +1091,133 @@ class NewGenerationMixin(GenerationMixin):
                     break
                 else:
                     this_peer_finished = True
+
+
+_END = object()
+
+
+class _TokenQueueStreamer:
+    """Receives the tokens from transformers' `generate(streamer=...)` and queues them.
+
+    transformers first passes the prompt (or the decoder start ids), then the new token ids of
+    every step as a tensor of shape `(batch_size,)`; only the latter are queued.
+    """
+
+    def __init__(self):
+        self.queue = queue.Queue()
+        self._prompt_pending = True
+
+    def put(self, value):
+        if self._prompt_pending:
+            self._prompt_pending = False
+            return
+        self.queue.put(value)
+
+    def end(self):
+        self.queue.put(_END)
+
+
+class _StopWhenClosed(StoppingCriteria):
+    """Stops generation when the consumer closes the stream early."""
+
+    def __init__(self):
+        self.closed = False
+
+    def __call__(self, input_ids, scores, **kwargs):
+        return torch.full(
+            (input_ids.shape[0],), self.closed, dtype=torch.bool, device=input_ids.device
+        )
+
+
+def _generate(
+    model,
+    inputs=None,
+    generation_config=None,
+    logits_processor=None,
+    stopping_criteria=None,
+    prefix_allowed_tokens_fn=None,
+    synced_gpus=False,
+    seed=0,
+    **kwargs,
+):
+    """`generate()` for transformers >= 4.41, built on transformers' public `generate()`."""
+    setup_seed(seed)
+
+    # As in 0.0.5: a `do_stream` keyword wins over `generation_config.do_stream`.
+    do_stream = kwargs.pop("do_stream", None)
+    if do_stream is None:
+        config = generation_config if generation_config is not None else model.generation_config
+        do_stream = getattr(config, "do_stream", False)
+    if generation_config is not None and hasattr(generation_config, "do_stream"):
+        generation_config = copy.deepcopy(generation_config)
+        del generation_config.do_stream
+
+    generate_kwargs = dict(
+        generation_config=generation_config,
+        logits_processor=logits_processor,
+        stopping_criteria=stopping_criteria,
+        prefix_allowed_tokens_fn=prefix_allowed_tokens_fn,
+        # None lets transformers decide (e.g. DeepSpeed ZeRO-3); True is passed on.
+        synced_gpus=True if synced_gpus else None,
+        **kwargs,
+    )
+    if not do_stream:
+        # Call transformers' own generate(), not `model.generate`, which init_stream_support()
+        # points back to this function.
+        return GenerationMixin.generate(model, inputs, **generate_kwargs)
+
+    effective = generation_config if generation_config is not None else model.generation_config
+    num_beams = kwargs.get("num_beams", getattr(effective, "num_beams", 1)) or 1
+    num_beam_groups = kwargs.get("num_beam_groups", getattr(effective, "num_beam_groups", 1)) or 1
+    if num_beams > 1 or num_beam_groups > 1:
+        raise ValueError(
+            "do_stream=True only supports sampling with num_beams=1 (got num_beams=%s, "
+            "num_beam_groups=%s): beam search can't emit its tokens one step at a time. "
+            "Use do_stream=False for beam search." % (num_beams, num_beam_groups)
+        )
+    # 0.0.5 always sampled in stream mode, whatever `do_sample` said.
+    generate_kwargs["do_sample"] = True
+
+    if isinstance(inputs, torch.Tensor):
+        device = inputs.device
+    elif isinstance(kwargs.get("input_ids"), torch.Tensor):
+        device = kwargs["input_ids"].device
+    else:
+        device = model.device
+    return _stream(model, inputs, generate_kwargs, device)
+
+
+def _stream(model, inputs, generate_kwargs, device):
+    streamer = _TokenQueueStreamer()
+    stopper = _StopWhenClosed()
+    criteria = StoppingCriteriaList(list(generate_kwargs.pop("stopping_criteria") or []))
+    criteria.append(stopper)
+    errors = []
+
+    def run():
+        try:
+            with torch.no_grad():
+                GenerationMixin.generate(
+                    model, inputs, streamer=streamer, stopping_criteria=criteria, **generate_kwargs
+                )
+        except BaseException as e:  # re-raised in the consumer
+            errors.append(e)
+        finally:
+            streamer.queue.put(_END)
+
+    thread = threading.Thread(target=run, name="transformers-stream-generator", daemon=True)
+    thread.start()
+    try:
+        while True:
+            tokens = streamer.queue.get()
+            if tokens is _END:
+                break
+            yield tokens.to(device)
+    finally:
+        stopper.closed = True
+        thread.join()
+    if errors:
+        raise errors[0]
 
 
 def init_stream_support():
