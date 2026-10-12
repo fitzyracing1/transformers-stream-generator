@@ -173,3 +173,8 @@ for token in generator:
 ### Example
 + run python script [example](./example/run.py) by gpt2
 + run web [example](./example/run_web.py)  by gpt2 and test in client [example](./example/test_client.py)
+
+## Documentation
+
+- In-repo docs: [docs/](docs/index.md)
+- Wiki: [https://github.com/fitzyracing1/transformers-stream-generator/wiki](https://github.com/fitzyracing1/transformers-stream-generator/wiki)
