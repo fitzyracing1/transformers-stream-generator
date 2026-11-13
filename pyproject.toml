@@ -43,6 +43,7 @@ Issues = "https://github.com/fitzyracing1/transformers-stream-generator/issues"
 Changelog = "https://github.com/fitzyracing1/transformers-stream-generator/blob/main/CHANGELOG.md"
 Upstream = "https://github.com/LowinLi/transformers-stream-generator"
 "360 Bench" = "https://github.com/fitzyracing1/360-bench"
+Funding = "https://github.com/sponsors/fitzyracing1"
 
 [tool.setuptools]
 packages = ["transformers_stream_generator"]
